@@ -21,7 +21,12 @@ export const label = ADAPTER_LABEL;
  * prefer detectModel() plus manual entry over curated placeholder models,
  * since Hermes availability depends on the user's local configuration.
  */
-export const models: { id: string; label: string }[] = [];
+export const models: { id: string; label: string }[] = [
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" },
+  { id: "deepseek/deepseek-chat", label: "DeepSeek Chat (V3)" },
+  { id: "deepseek/deepseek-reasoner", label: "DeepSeek Reasoner (R1)" }
+];
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.

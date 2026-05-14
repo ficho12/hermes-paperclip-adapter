@@ -76,15 +76,37 @@ Your Paperclip identity:
   Company ID: {{companyId}}
   API Base: {{paperclipApiUrl}}
 
+{{#wakeReason}}
+Wake reason: {{wakeReason}}
+{{/wakeReason}}
+
+{{#commentId}}
+## 🚨 USER MESSAGE — THIS IS YOUR NEW TASK
+
+You were woken by a comment from the user (@ficho12 / Board). Their message IS your new
+highest-priority task. DROP any automated workflow or routine — do what the user asks
+BEFORE anything else. Only after fully addressing the user's request should you consider
+resuming any routine workflow.
+
+Read the user's message:
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
+
+Read ALL recent comments too (the user may have left multiple messages):
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments?limit=10" | python3 -c "import sys,json; [print(c['authorName'],':',c['body'][:200]) for c in json.load(sys.stdin) if c.get('authorType')=='user']"\`
+
+DO what the user asked. If you need clarification, POST a reply comment. When done,
+post a reply comment summarizing what you did.
+{{/commentId}}
+
 {{#taskId}}
-## Assigned Task
+## Background Task (routine)
 
 Issue ID: {{taskId}}
 Title: {{taskTitle}}
 
 {{taskBody}}
 
-## Workflow
+## Workflow (only if no user message above)
 
 1. Work on the task using your tools
 2. When done, mark the issue as completed:
@@ -94,15 +116,6 @@ Title: {{taskTitle}}
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
-
-{{#commentId}}
-## Comment on This Issue
-
-Someone commented. Read it:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
-
-Address the comment, POST a reply if needed, then continue working.
-{{/commentId}}
 
 {{#noTask}}
 ## Heartbeat Wake — Check for Work
@@ -166,6 +179,18 @@ function buildPrompt(
   // Handle conditional sections: {{#key}}...{{/key}}
   let rendered = template;
 
+  // {{#commentId}}...{{/commentId}} — user comment (HIGHEST priority, process first)
+  rendered = rendered.replace(
+    /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
+    commentId ? "$1" : "",
+  );
+
+  // {{#wakeReason}}...{{/wakeReason}} — include if wake reason known
+  rendered = rendered.replace(
+    /\{\{#wakeReason\}\}([\s\S]*?)\{\{\/wakeReason\}\}/g,
+    wakeReason ? "$1" : "",
+  );
+
   // {{#taskId}}...{{/taskId}} — include if task is assigned
   rendered = rendered.replace(
     /\{\{#taskId\}\}([\s\S]*?)\{\{\/taskId\}\}/g,
@@ -176,12 +201,6 @@ function buildPrompt(
   rendered = rendered.replace(
     /\{\{#noTask\}\}([\s\S]*?)\{\{\/noTask\}\}/g,
     taskId ? "" : "$1",
-  );
-
-  // {{#commentId}}...{{/commentId}} — include if comment exists
-  rendered = rendered.replace(
-    /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
-    commentId ? "$1" : "",
   );
 
   // Replace remaining {{variable}} placeholders
@@ -396,10 +415,14 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume
-  const prevSessionId = cfgString(
-    (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
-  );
+  // Session resume — SKIP when a user comment triggered this wake.
+  // Resuming a routine-heavy session drowns the user message (Pattern M).
+  // Fresh session ensures the 🚨 USER MESSAGE block takes full priority.
+  // NOTE: commentId is extracted earlier in buildPrompt() via ctx.config.commentId.
+  const hasComment = cfgString((ctx.config as Record<string, unknown> | null)?.commentId);
+  const prevSessionId = hasComment
+    ? undefined
+    : cfgString((ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId);
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
   }
