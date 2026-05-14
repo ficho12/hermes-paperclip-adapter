@@ -142,14 +142,18 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip 2026.513.0+ puts task context in ctx.context, adapter config in ctx.config.
+  // Fall back to ctx.config for backwards compatibility with older versions.
+  const taskCtx = (ctx.context ?? ctx.config ?? {}) as Record<string, unknown>;
+
+  const taskId = cfgString(taskCtx.taskId);
+  const taskTitle = cfgString(taskCtx.taskTitle) || "";
+  const taskBody = cfgString(taskCtx.paperclipTaskMarkdown) || cfgString(taskCtx.taskBody) || "";
+  const commentId = cfgString(taskCtx.commentId) || "";
+  const wakeReason = cfgString(taskCtx.wakeReason) || "";
+  const companyName = cfgString(taskCtx.companyName) || "";
+  const projectName = cfgString(taskCtx.projectName) || "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -418,8 +422,9 @@ export async function execute(
   // Session resume — SKIP when a user comment triggered this wake.
   // Resuming a routine-heavy session drowns the user message (Pattern M).
   // Fresh session ensures the 🚨 USER MESSAGE block takes full priority.
-  // NOTE: commentId is extracted earlier in buildPrompt() via ctx.config.commentId.
-  const hasComment = cfgString((ctx.config as Record<string, unknown> | null)?.commentId);
+  // NOTE: commentId is in ctx.context (Paperclip 2026.513.0+) with ctx.config fallback.
+  const taskCtxForResume = (ctx.context ?? ctx.config ?? {}) as Record<string, unknown>;
+  const hasComment = cfgString(taskCtxForResume.commentId);
   const prevSessionId = hasComment
     ? undefined
     : cfgString((ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId);
