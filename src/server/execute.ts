@@ -266,6 +266,68 @@ function cleanResponse(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Banner-only stale-session detection (BOO-456)
+// ---------------------------------------------------------------------------
+
+/**
+ * Startup banner markers. A stale resumed session prints the startup banner
+ * (quiet mode normally suppresses it — its presence signals the stale path),
+ * then exits without loading current instructions/skills or doing any work.
+ */
+const STARTUP_BANNER_HEADER_RE = /hermes agent\s+v?[\d.]/i;
+const STARTUP_BANNER_LIST_RE = /available (tools|skills)/i;
+
+/**
+ * Tool-call markers in raw stdout that prove a run actually did work.
+ * A productive run has at least one of these; a banner-only run has none.
+ */
+const TOOL_ACTIVITY_RES = [
+  /^\s*\[tool\]/m, // non-quiet tool start lines
+  /^\s*\[done\]\s*┊/m, // pipe-mode tool completion lines
+  /tool_call|tool_use|tool_result|toolResult/i,
+  /<tool_call>|<tool_use>|<tool_result>/i,
+  /(?:calling|invoking|running)\s+(?:the\s+)?tool/i,
+];
+
+function hasToolActivity(stdout: string): boolean {
+  if (TOOL_ACTIVITY_RES.some((re) => re.test(stdout))) return true;
+  // Quiet-mode tool lines: "┊ {emoji} {verb} ..." — but NOT "┊ 💬 {assistant}".
+  // (A negative-lookahead regex is unreliable here because \s* can backtrack
+  // past the space between ┊ and 💬; check per-line instead.)
+  return stdout.split("\n").some((line) => {
+    const t = line.trim();
+    if (!t.startsWith("┊")) return false;
+    return !t.slice(1).trimStart().startsWith("💬");
+  });
+}
+
+function isStartupBanner(text: string): boolean {
+  const t = text.toLowerCase();
+  return STARTUP_BANNER_HEADER_RE.test(t) && STARTUP_BANNER_LIST_RE.test(t);
+}
+
+/**
+ * Detect the stale-session fingerprint (BOO-454): a resumed run whose output
+ * is empty or consists only of the Hermes startup banner, with zero tool calls
+ * and no substantive content after cleaning. Such runs must NOT persist their
+ * session — the next run should start fresh so it loads current instructions
+ * and skills instead of looping on the broken resumed session.
+ *
+ * Exported for verification/testing (AC5).
+ */
+export function isBannerOnlyRun(
+  stdout: string,
+  response: string | undefined,
+): boolean {
+  // Any tool activity means the run did real work — keep the session.
+  if (hasToolActivity(stdout)) return false;
+
+  const resp = (response ?? "").trim();
+  // Empty response with no tool calls, or banner-text-only response.
+  return resp.length === 0 || isStartupBanner(resp);
+}
+
+// ---------------------------------------------------------------------------
 // Output parsing
 // ---------------------------------------------------------------------------
 
@@ -346,6 +408,10 @@ export async function execute(
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
   const extraArgs = cfgStringArray(config.extraArgs);
   const persistSession = cfgBoolean(config.persistSession) !== false;
+  // BOO-456: drop the session of banner-only resumed runs so the next run
+  // starts fresh (stale sessions loop forever otherwise). Default: on.
+  const freshSessionOnBannerOnly =
+    cfgBoolean(config.freshSessionOnBannerOnly) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
@@ -551,11 +617,33 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
+  // BOO-456: banner-only resumed runs (stale-session fingerprint) must NOT
+  // persist their session — the next run for this issue starts fresh and
+  // loads current instructions/skills instead of looping on the broken
+  // session. Productive resumed runs keep persisting exactly as before.
+  const dropBannerOnlySession =
+    freshSessionOnBannerOnly &&
+    prevSessionId !== undefined &&
+    isBannerOnlyRun(result.stdout || "", parsed.response);
+
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
-    executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    if (dropBannerOnlySession) {
+      await ctx.onLog(
+        "stdout",
+        "[hermes] Banner-only resumed run detected (BOO-456) — session NOT persisted; next run starts fresh\n",
+      );
+    } else {
+      executionResult.sessionParams = { sessionId: parsed.sessionId };
+      executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+    }
   }
+
+  // Surface the drop decision in resultJson so the board can verify AC1/AC5.
+  executionResult.resultJson = {
+    ...(executionResult.resultJson || {}),
+    session_dropped_banner_only: dropBannerOnlySession || null,
+  };
 
   return executionResult;
 }

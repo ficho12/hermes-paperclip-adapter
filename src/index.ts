@@ -62,6 +62,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | persistSession | boolean | true | Resume sessions across heartbeats |
+| freshSessionOnBannerOnly | boolean | true | Drop the session when a resumed run produces only the startup banner (stale-session fingerprint), so the next run starts fresh. Set false to always keep sessions. |
 | worktreeMode | boolean | false | Use git worktree for isolated changes |
 | checkpoints | boolean | false | Enable filesystem checkpoints |
 
