@@ -228,17 +228,39 @@ const TOKEN_USAGE_REGEX =
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
 
-interface ParsedOutput {
+export interface ParsedOutput {
   sessionId?: string;
   response?: string;
   usage?: UsageSummary;
   costUsd?: number;
   errorMessage?: string;
+  terminalFailure?: boolean;
 }
 
 // ---------------------------------------------------------------------------
 // Response cleaning
 // ---------------------------------------------------------------------------
+
+// Hermes prints provider failures on stdout and may still exit with code 0.
+// Keep those diagnostics out of summaries so a real fallback response remains
+// distinguishable from a terminal provider failure.
+const PROVIDER_DIAGNOSTIC_LINE_RE =
+  /^(?:[^\p{L}\p{N}\s]+\s*)?(?:Auxiliary title generation failed|API call failed|Provider:|Error:\s*HTTP\s+\d{3}|Details:|Billing or credits exhausted|Primary model failed|Authentication failed|Rate limited|Final error:|allowance(?:\s|$))/iu;
+
+const TERMINAL_PROVIDER_FAILURE_RE =
+  /(?:API call failed after \d+ retries|Rate limited after \d+ retries|Final error:\s*HTTP\s+\d{3})/i;
+
+function isProviderDiagnosticLine(line: string): boolean {
+  return PROVIDER_DIAGNOSTIC_LINE_RE.test(line.trim());
+}
+
+function lastTerminalProviderFailure(text: string): string | undefined {
+  let last: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    if (TERMINAL_PROVIDER_FAILURE_RE.test(line)) last = line.trim();
+  }
+  return last;
+}
 
 /** Strip noise lines from a Hermes response (tool output, system messages, etc.) */
 function cleanResponse(raw: string): string {
@@ -248,6 +270,7 @@ function cleanResponse(raw: string): string {
       const t = line.trim();
       if (!t) return true; // keep blank lines for paragraph separation
       if (t.startsWith("[tool]") || t.startsWith("[hermes]") || t.startsWith("[paperclip]")) return false;
+      if (isProviderDiagnosticLine(t)) return false;
       if (t.startsWith("session_id:")) return false;
       if (/^\[\d{4}-\d{2}-\d{2}T/.test(t)) return false;
       if (/^\[done\]\s*┊/.test(t)) return false;
@@ -331,7 +354,7 @@ export function isBannerOnlyRun(
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -385,6 +408,16 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     if (errorLines.length > 0) {
       result.errorMessage = errorLines.slice(0, 5).join("\n");
     }
+  }
+
+  // Hermes reports exhausted credits/rate limits on stdout and can still
+  // return exit code 0. A terminal marker with no substantive response is a
+  // failed run; an actual fallback response remains successful.
+  const terminalFailure =
+    lastTerminalProviderFailure(stdout) ?? lastTerminalProviderFailure(stderr);
+  if (terminalFailure && !result.response) {
+    result.errorMessage = terminalFailure;
+    result.terminalFailure = true;
   }
 
   return result;
@@ -585,7 +618,10 @@ export async function execute(
 
   // ── Build result ───────────────────────────────────────────────────────
   const executionResult: AdapterExecutionResult = {
-    exitCode: result.exitCode,
+    // Hermes' wrapper may swallow provider failures and exit 0. Convert only
+    // the high-confidence terminal failure marker; ordinary stderr warnings
+    // retain the child process exit code.
+    exitCode: parsed.terminalFailure && result.exitCode === 0 ? 1 : result.exitCode,
     signal: result.signal,
     timedOut: result.timedOut,
     provider: resolvedProvider,
